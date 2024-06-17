@@ -69,15 +69,13 @@ void send_file(asio::ip::tcp::socket &socket, const std::string& file_name) {
         return;
     }
 
-    std::ifstream source(file_name, std::ios::binary | std::ios::ate);
-    source.seekg(0, std::ios::end);
-    std::size_t file_size = source.tellg();
-    source.seekg(0, std::ios::beg);
+    asio::error_code error;
+    std::ifstream source(file_name, std::ios::in | std::ios::binary);
+    std::size_t file_size = fs::file_size(file, error);
     asio::write(socket, asio::buffer(&file_size, sizeof(file_size)));
 
-    asio::error_code error;
     std::size_t sent = 0;
-    std::vector<char> buffer(1024);
+    std::vector<char> buffer(8192);
     while (!source.eof() && !error) {
         source.read(buffer.data(), buffer.size());
         sent += asio::write(socket, asio::buffer(buffer.data(), source.gcount()), error);
@@ -119,7 +117,7 @@ void receive_file(asio::ip::tcp::socket& socket, std::string&& file) {
         return;
     }
 
-    std::vector<char> file_buffer(1024);
+    std::vector<char> file_buffer(8192);
     while (received < file_size && !error) {
         std::size_t length = socket.read_some(asio::buffer(file_buffer), error);
         destination.write(file_buffer.data(), length);
@@ -146,25 +144,17 @@ void send_string(asio::ip::tcp::socket& socket, const std::u8string& str) {
 
 void send_dir_file(asio::ip::tcp::socket& socket, const fs::path& file_path) {
     std::error_code error;
-    std::ifstream file(file_path, std::ios::binary);
+    std::ifstream file(file_path, std::ios::in | std::ios::binary);
     
     if (file) {
-        // Indicate file type
         char type = 'F';
         asio::write(socket, asio::buffer(&type, sizeof(type)), error);
-
-        // Send file path relative to the base directory
         send_string(socket, fs::relative(file_path).u8string());
-        // Get file size
-        file.seekg(0, std::ios::end);
-        std::size_t file_size = file.tellg();
-        file.seekg(0, std::ios::beg);
 
-        // Send file size
+        std::size_t file_size = fs::file_size(file_path, error);
         asio::write(socket, asio::buffer(&file_size, sizeof(file_size)), error);
 
-        // Send file content in chunks
-        const std::size_t buffer_size = 1024;  // 8 KB chunks
+        const std::size_t buffer_size = 8192;  
         std::vector<char> buffer(buffer_size);
         std::size_t bytes_sent = 0;
 
@@ -174,7 +164,6 @@ void send_dir_file(asio::ip::tcp::socket& socket, const fs::path& file_path) {
             std::size_t len = asio::write(socket, asio::buffer(buffer.data(), bytes_to_read), error);
             bytes_sent += len;
 
-            // Calculate and display progress
             std::print("Progress: {}%\r",static_cast<int32_t>((static_cast<double>(bytes_sent) / file_size) * 100));
         }
         std::println("");
@@ -188,15 +177,12 @@ void send_directory(asio::ip::tcp::socket& socket, const fs::path& dir_path) {
         if (fs::is_regular_file(entry.status()) && !error) {
             send_dir_file(socket, entry.path());
         } else if (fs::is_directory(entry.status()) && !error) {
-            // Indicate directory type
             char type = 'D';
             asio::write(socket, asio::buffer(&type, sizeof(type)), error);
 
-            // Send directory path relative to the base directory
             send_string(socket, fs::relative(entry.path()).u8string());
         }
     }
-    // Send a signal to indicate end of transmission
     char end_signal = 'E';
     asio::write(socket, asio::buffer(&end_signal, sizeof(end_signal)), error);
 }
