@@ -154,16 +154,11 @@ void send_dir_file(asio::ip::tcp::socket& socket, const fs::path& file_path) {
         std::size_t file_size = fs::file_size(file_path, error);
         asio::write(socket, asio::buffer(&file_size, sizeof(file_size)), error);
 
-        const std::size_t buffer_size = 8192;  
-        std::vector<char> buffer(buffer_size);
+        std::vector<char> buffer(8192);
         std::size_t bytes_sent = 0;
-
-        while (bytes_sent < file_size && !error) {
-            std::size_t bytes_to_read = std::min(buffer_size, file_size - bytes_sent);
-            file.read(buffer.data(), bytes_to_read);
-            std::size_t len = asio::write(socket, asio::buffer(buffer.data(), bytes_to_read), error);
-            bytes_sent += len;
-
+        while (!file.eof() && !error) {
+            file.read(buffer.data(), buffer.size());
+            bytes_sent += asio::write(socket, asio::buffer(buffer.data(), file.gcount()), error);
             std::print("Progress: {}%\r",static_cast<int32_t>((static_cast<double>(bytes_sent) / file_size) * 100));
         }
         std::println("");
