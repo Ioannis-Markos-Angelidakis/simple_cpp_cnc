@@ -5,6 +5,7 @@
 #include <fstream>
 #include <asio.hpp>
 #include <patterns.hpp>
+#include <future>
 
 using mpark::patterns::match;
 using mpark::patterns::pattern;
@@ -60,10 +61,10 @@ void change_directory(asio::ip::tcp::socket &socket, std::string&& directory) {
 
 void send_file(asio::ip::tcp::socket &socket, const std::string& file_name) {
     std::string file = fs::current_path().string() + "/" + file_name;
-    std::println("REQUESTED: {}", file);
+    //std::println("REQUESTED: {}", file);
 
     if (!fs::exists(file)) {
-        std::println("[-] Error opening file for reading.");
+        //std::println("[-] Error opening file for reading.");
         std::size_t file_size = 0;
         asio::write(socket, asio::buffer(&file_size, sizeof(file_size)));
         return;
@@ -79,19 +80,19 @@ void send_file(asio::ip::tcp::socket &socket, const std::string& file_name) {
     while (!source.eof() && !error) {
         source.read(buffer.data(), buffer.size());
         sent += asio::write(socket, asio::buffer(buffer.data(), source.gcount()), error);
-        std::print("Sending... {}%\r", static_cast<int32_t>((static_cast<double>(sent) / file_size) * 100));
+        //std::print("Sending... {}%\r", static_cast<int32_t>((static_cast<double>(sent) / file_size) * 100));
     }
 
     if (error) {
-        std::println("[-] Error sending data: {}", error.message());
+        //std::println("[-] Error sending data: {}", error.message());
     } else {
-        std::println("[+] File sent successfully.");
+        //std::println("[+] File sent successfully.");
     }
 }
 
 void receive_file(asio::ip::tcp::socket& socket, std::string&& file) {
     if (fs::exists(fs::current_path() / file) && !file.starts_with("-r ")) {
-        std::println("[-] File exists, abording...");
+        //std::println("[-] File exists, abording...");
         asio::write(socket, asio::buffer("[-] File exists! Use `-r` flag to replace.\n\n"));
         return;
     } else if (file.starts_with("-r ")) {
@@ -104,16 +105,16 @@ void receive_file(asio::ip::tcp::socket& socket, std::string&& file) {
     asio::read(socket, asio::buffer(&file_size, sizeof(file_size)));
 
     if (file_size <= 0) {
-        std::println("[-] REQUESTED Invalid file!");
+        //std::println("[-] REQUESTED Invalid file!");
         return;
     }
 
     std::size_t received = 0;
-    std::println("Receiving file of {} bytes", file_size);
+    //std::println("Receiving file of {} bytes", file_size);
 
     std::ofstream destination(file.data(), std::ios::binary);
     if (!destination) {
-        std::println("[-] Error opening file for writing");
+        //std::println("[-] Error opening file for writing");
         return;
     }
 
@@ -122,15 +123,15 @@ void receive_file(asio::ip::tcp::socket& socket, std::string&& file) {
         std::size_t length = socket.read_some(asio::buffer(file_buffer), error);
         destination.write(file_buffer.data(), length);
         received += length;
-        std::print("Downloading {}%\r", static_cast<int32_t>((static_cast<double>(received) / file_size) * 100));
+        //std::print("Downloading {}%\r", static_cast<int32_t>((static_cast<double>(received) / file_size) * 100));
     }
 
     if (received >= file_size) {
-        std::println("[+] File received successfully.");
+        //std::println("[+] File received successfully.");
     } else {
         destination.close();
         fs::remove(file);
-        std::println("[-] File transfer incomplete.");
+        //std::println("[-] File transfer incomplete.");
     }
 }
 
@@ -159,18 +160,31 @@ void send_dir_file(asio::ip::tcp::socket& socket, const fs::path& file_path) {
         while (!file.eof() && !error) {
             file.read(buffer.data(), buffer.size());
             bytes_sent += asio::write(socket, asio::buffer(buffer.data(), file.gcount()), error);
-            std::print("Progress: {}%\r",static_cast<int32_t>((static_cast<double>(bytes_sent) / file_size) * 100));
+            //std::print("Progress: {}%\r",static_cast<int32_t>((static_cast<double>(bytes_sent) / file_size) * 100));
         }
-        std::println("");
+		//std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        //std::println("");
     }
 }
 
 void send_directory(asio::ip::tcp::socket& socket, const fs::path& dir_path) {
     asio::error_code error;
+    size_t dir_size = 0;
+
+    for (const fs::directory_entry& entry : fs::recursive_directory_iterator(dir_path, error)) {
+      if (fs::is_regular_file(entry.status()) && !error) {
+        dir_size += fs::file_size(entry);
+      }
+    }
+    error.clear();
+    asio::write(socket, asio::buffer(&dir_size, sizeof(dir_size)), error);
+    
 
     for (const fs::directory_entry& entry : fs::recursive_directory_iterator(dir_path, error)) {
         if (fs::is_regular_file(entry.status()) && !error) {
-            send_dir_file(socket, entry.path());
+            std::future<void> files_async = std::async(std::launch::async, [&socket, entry]() {
+                send_dir_file(socket, entry.path());
+            });
         } else if (fs::is_directory(entry.status()) && !error) {
             char type = 'D';
             asio::write(socket, asio::buffer(&type, sizeof(type)), error);
@@ -191,21 +205,22 @@ void server_messages(asio::ip::tcp::socket& socket) {
         std::istream response_stream(&response);
         std::string command;
         std::getline(response_stream, command);
-        std::println("{}", command);
+        //std::println("{}", command);
 
-        match (command, command.starts_with("cd "), command.starts_with("download "), command.starts_with("upload "), command.starts_with("get ")) (
-            pattern("ls", _, _, _, _) = [&] { directory_listing(socket); },
-            pattern("pwd", _, _, _, _) = [&] { curr_path(socket); },
-            pattern(_, 1, _, _, _) = [&] { change_directory(socket, command.substr(3)); },
-            pattern(_, _, 1, _, _) = [&] { send_file(socket, command.substr(9)); },
-            pattern(_, _, _, 1, _) = [&] { receive_file(socket, command.substr(7)); },
-            pattern(_, _, _, _, 1) = [&] { send_directory(socket, command.substr(4)); },
-            pattern(_, _, _, _, _) = [&] { asio::write(socket, asio::buffer("[-] Invalid command!\n\n")); }
-        );
+        match(command, command.starts_with("cd "), command.starts_with("download "), 
+              command.starts_with("upload "), command.starts_with("get "))(
+            pattern("ls", _, _, _, _, _, _) = [&] { directory_listing(socket); },
+            pattern("pwd", _, _, _, _, _, _) = [&] { curr_path(socket); },
+            pattern(_, 1, _, _,  _, _, _) = [&] { change_directory(socket, command.substr(3)); },
+            pattern(_, _, 1, _, _, _, _) = [&] { send_file(socket, command.substr(9)); },
+            pattern(_, _, _, 1, _, _, _) = [&] { receive_file(socket, command.substr(7)); },
+            pattern(_, _, _, _, 1, _, _) = [&] { send_directory(socket, command.substr(4)); },
+            pattern(_, _, _, _, _, _, _) = [&] { asio::write(socket, asio::buffer("[-] Invalid command!\n\n")); }
+            );
     }
 
     if (error != asio::error::eof && error != asio::error::connection_reset) {
-        std::println("[-] ERROR SERVER");
+        //std::println("[-] ERROR SERVER");
     }
 }
 
@@ -213,14 +228,14 @@ int32_t main() {
     asio::io_context io_context;
     asio::ip::tcp::acceptor acceptor(io_context, asio::ip::tcp::endpoint(asio::ip::tcp::v4(), 12345));
 
-    std::println("Server started. Waiting for connections...");
+    //std::println("Server started. Waiting for connections...");
 
     while (true) {
         asio::ip::tcp::socket socket(io_context);
         acceptor.accept(socket);
 
-        std::println("[+] New connection established");
+        //std::println("[+] New connection established");
         server_messages(socket);
+        
     }
 }
-//clang++ -Wall -Wextra -Wpedantic -Wconversion -fsanitize=address server.cpp -o server -std=c++23 -lws2_32
