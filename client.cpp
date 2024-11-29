@@ -3,8 +3,11 @@
 #include <fstream>
 #include <filesystem>
 #include <asio.hpp>
+#include <future>
 
 namespace fs = std::filesystem;
+const std::string IP = "";
+const std::string PORT = "";
 
 bool server_messages(asio::ip::tcp::socket& socket) {
     asio::streambuf response;
@@ -79,7 +82,7 @@ void download_file(asio::ip::tcp::socket& socket, std::string_view file) {
     std::size_t received = 0;
     std::println("Receiving file of {} bytes", file_size);
 
-    std::ofstream destination(file.data(), std::ios::binary);
+    std::ofstream destination(file.data(), std::ios::out | std::ios::binary);
     if (!destination) {
         std::println("[-] Error opening file for writing");
         return;
@@ -120,13 +123,13 @@ void receive_string(asio::ip::tcp::socket& socket, std::u8string& str) {
     str.assign(buffer.begin(), buffer.end());
 }
 
-void receive_file(asio::ip::tcp::socket& socket, const fs::path& base_path) {
+size_t receive_file(asio::ip::tcp::socket& socket, const fs::path& base_path, const size_t dir_size, size_t total) {
     std::error_code error;
     std::u8string file_path_str;
 
     receive_string(socket, file_path_str);
     if (error) {
-        return;
+        return 0;
     }
 
     fs::path file_path = base_path / file_path_str;
@@ -135,7 +138,7 @@ void receive_file(asio::ip::tcp::socket& socket, const fs::path& base_path) {
     std::size_t file_size;
     asio::read(socket, asio::buffer(&file_size, sizeof(file_size)), error);
     if (error) {
-        return;
+        return 0;
     }
 
     std::ofstream file(file_path, std::ios::binary);
@@ -153,16 +156,19 @@ void receive_file(asio::ip::tcp::socket& socket, const fs::path& base_path) {
         if (error) {
             break;
         }
+        std::print("Progress: {}%\r", static_cast<int32_t>((static_cast<double>(total + bytes_received) / dir_size) * 100));
         file.write(buffer.data(), len);
         bytes_received += len;
-
-        std::print("Progress: {}%\r",static_cast<int32_t>((static_cast<double>(bytes_received) / file_size) * 100));
     }
-    std::cout << std::endl;
+
+    return file_size;
 }
 
 void receive_directory(asio::ip::tcp::socket& socket, const fs::path& base_path) {
     std::error_code error;
+    size_t dir_size = 0;
+    size_t total = 0;
+    asio::read(socket, asio::buffer(&dir_size, sizeof(dir_size)), error);
 
     while (true) {
         char type;
@@ -177,13 +183,17 @@ void receive_directory(asio::ip::tcp::socket& socket, const fs::path& base_path)
         } else if (type == 'D') { // Receive directory path
             std::u8string dir_path_str;
             receive_string(socket, dir_path_str);
+
             if (error) {
                 break;
             }
             fs::path dir_path = base_path / dir_path_str;
             fs::create_directories(dir_path);
-        } else if (type == 'F') { // Receive file
-            receive_file(socket, base_path);
+        } else if (type == 'F') { // Receive file 
+            std::future<void> files_async = std::async(std::launch::async, [&socket, base_path, dir_size, &total] () { 
+                total += receive_file(socket, base_path, dir_size, total); 
+            });
+
             if (error) {
                 break;
             }
@@ -196,14 +206,14 @@ int32_t main() {
     asio::ip::tcp::socket socket(io_context);
     asio::ip::tcp::resolver resolver(io_context);
     asio::error_code error;
-    asio::connect(socket, resolver.resolve("192.168.2.7", "12345"), error);
-
+    asio::connect(socket, resolver.resolve(IP, PORT), error);
     std::string command = "";
+    
     while (true) {
         if (error) {
             std::println("[-] Trying to reconnect...");
             std::this_thread::sleep_for(std::chrono::seconds(1));
-            asio::connect(socket, resolver.resolve("192.168.2.7", "12345"), error);
+            asio::connect(socket, resolver.resolve(IP, PORT), error);
             continue;
         }
 
@@ -244,9 +254,8 @@ int32_t main() {
             receive_directory(socket, file_name);
         } else {
             asio::write(socket, asio::buffer(command + "\n"), error);
-            std::this_thread::sleep_for(std::chrono::milliseconds(1)); //Latency on %% validations requires this delay
+            std::this_thread::sleep_for(std::chrono::milliseconds(1)); // Latency on %% validations requires this delay
             server_messages(socket);
         }
     }
 }
-//clang++ -Wall -Wextra -Wpedantic -Wconversion -fsanitize=address client.cpp -o client -std=c++23 -lws2_32
